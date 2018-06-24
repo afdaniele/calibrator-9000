@@ -9,10 +9,11 @@ const bool DEBUG = true;
 // define constants
 const float frequency = 100.0;      // the firmware runs at 100Hz
 const float data_frequency = 30.0;  // the firmware spits data at 30Hz
-const int adc_bits_resolution = 12;
-const unsigned int serial_input_max_num_bytes = 50;
+const int adc_bits_resolution = 8;
+const unsigned int serial_input_max_num_bytes = 33;
 const int knob_calibration_time_secs = 2;
 const bool potentiometer_inverted = true;
+const int led_pwm_high = 255;
 const int num_knobs = 6;
 int knob_raw_value[num_knobs];
 float knob_value[num_knobs];
@@ -87,64 +88,98 @@ enum COMMAND_REQUEST_OP{  // this has size int16_t
   SHUTDOWN = 4
 };
 
+#pragma pack(push, 1)
 typedef struct {
- uint32_t seq;
- int16_t operation;
- int16_t checksum;
+  uint32_t seq;
+  int16_t operation;
+  int16_t checksum;
 } __attribute__((__packed__)) request_packet_header_t;
 
 typedef struct {
- request_packet_header_t header;
- byte payload[16];
+  request_packet_header_t header;
+  byte payload[16];
 } __attribute__((__packed__)) request_packet_t;
 
 typedef struct {
- uint8_t enable_x;
- uint8_t enable_y;
- uint8_t enable_z;
- uint8_t enable_r;
- uint8_t enable_p;
- uint8_t enable_w;
- byte unused[10];
+  uint8_t enable_x;
+  uint8_t enable_y;
+  uint8_t enable_z;
+  uint8_t enable_r;
+  uint8_t enable_p;
+  uint8_t enable_w;
+  byte unused[10];
 } __attribute__((__packed__)) request_payload_initialize_t;
 
 typedef struct {
- uint8_t recalibrate_x;
- uint8_t recalibrate_y;
- uint8_t recalibrate_z;
- uint8_t recalibrate_r;
- uint8_t recalibrate_p;
- uint8_t recalibrate_w;
- byte unused[10];
+  uint8_t recalibrate_x;
+  uint8_t recalibrate_y;
+  uint8_t recalibrate_z;
+  uint8_t recalibrate_r;
+  uint8_t recalibrate_p;
+  uint8_t recalibrate_w;
+  byte unused[10];
 } __attribute__((__packed__)) request_payload_recalibrate_t;
+#pragma pack(pop)
 
 // data packet
 enum DATA_PACKET_TYPE{  // this has size int16_t
   EMPTY = 0,
   STATUS = 1,
-  DATA = 2
+  DATA = 2,
+  LOG = 3
 };
 
+#pragma pack(push, 1)
 typedef struct {
- uint32_t seq;
- uint16_t type;
- int16_t checksum;
+  uint32_t seq;
+  uint16_t type;
+  int16_t checksum;
 } __attribute__((__packed__)) data_packet_header_t;
 
 typedef struct {
- data_packet_header_t header;
- byte payload[16];
+  data_packet_header_t header;
+  byte payload[24];
 } __attribute__((__packed__)) data_packet_t;
 
 typedef struct {
- uint8_t enable_x;
- uint8_t enable_y;
- uint8_t enable_z;
- uint8_t enable_r;
- uint8_t enable_p;
- uint8_t enable_w;
- byte unused[10];
-} __attribute__((__packed__)) data_payload_t;
+  int16_t device_status;
+  uint8_t enabled_x;
+  uint8_t enabled_y;
+  uint8_t enabled_z;
+  uint8_t enabled_r;
+  uint8_t enabled_p;
+  uint8_t enabled_w;
+  uint8_t calibrated_x;
+  uint8_t calibrated_y;
+  uint8_t calibrated_z;
+  uint8_t calibrated_r;
+  uint8_t calibrated_p;
+  uint8_t calibrated_w;
+  byte unused[10];
+} __attribute__((__packed__)) data_payload_status_t;
+
+typedef struct {
+  float axis_x;
+  float axis_y;
+  float axis_z;
+  float axis_r;
+  float axis_p;
+  float axis_w;
+} __attribute__((__packed__)) data_payload_data_t;
+
+typedef struct {
+  uint8_t length;
+  uint8_t level;
+  char message[22];
+} __attribute__((__packed__)) data_payload_log_t;
+#pragma pack(pop)
+
+// log levels
+enum LOG_LEVEL{  // this has size int16_t
+  INFO = 0,
+  WARNING = 1,
+  ERROR = 2
+};
 
 // compute knob calibration dead zone limits and timer counter
 int knob_calibration_lower_limit = knob_calibration_dead_zone_center - knob_calibration_dead_zone_extension;
@@ -159,6 +194,8 @@ int spin_counter_range = 2000;
 char strbuf[512];
 int knob_calibration_timer_counters[num_knobs];
 uint32_t packet_header_seq = 0;
+request_packet_t inbound_packet;
+data_packet_t outbound_packet;
 
 // setup code, runs once
 void setup() {
@@ -166,7 +203,7 @@ void setup() {
   Serial.begin(9600);
   // initialize knobs buffer
   for( int i = 0; i < num_knobs; i++ ){
-    knob_value[i] = -1.0;
+    knob_value[i] = 0.0;
     knob_raw_value[i] = -1;
     knob_zero_value[i] = -1;
     active_knobs[i] = -1;
@@ -174,6 +211,8 @@ void setup() {
   }
   // configure ADC
   analogReadResolution(adc_bits_resolution);
+  
+  
   // TODO: read this from serial
   active_knobs[0] = 0;
   active_knobs[1] = 1;
@@ -191,24 +230,23 @@ void setup() {
   }
   // set next state
   status = CALIBRATING;
+  
 }//setup
 
 // this function stops the firmware and halts the device
 void(* shutdown_fcn) (void) = 0;
 
-void reboot_fcn(){
-  //TODO: connect the RST port of the board to a GPIO port (e.g., 7) and set it to HIGH to reboot the board
-}
-
 // put your main code here, to run repeatedly:
 void loop() {
   // if somebody is talking to the firmware over USBSerial
-  while (Serial.available () > 0)
+  while( Serial.available () > 0 )
     process_incoming_byte( Serial.read() );
+    
   // FAILURE
   if( status == FAILURE ){
     return;  
   }
+  
   // read knob values
   for( int i = 0; i < num_active_knobs; i++ ){
     int knob_id = active_knobs[i];
@@ -227,6 +265,12 @@ void loop() {
       }
     }
   }
+  
+  // DEBUG only
+  if( DEBUG ){
+    debug_fcn();
+  }
+  
   // CALIBRATION
   if( status == CALIBRATING ){
     // check which knob is not calibrated yet
@@ -251,32 +295,42 @@ void loop() {
         }
       }
     }
-    // debug only
-    if( DEBUG ){
-      debug_fcn();
+    // switch state
+    int uncalibrated_knobs = 0;
+    for( int i = 0; i < num_active_knobs; i++ ){
+      int knob_id = active_knobs[i];
+      if( knob_status[knob_id] == UNCALIBRATED )
+        uncalibrated_knobs += 1;
     }
+    if( uncalibrated_knobs == 0 )
+      status = WORKING;
   }
-  // switch state
-  int uncalibrated_knobs = 0;
-  for( int i = 0; i < num_active_knobs; i++ ){
-    int knob_id = active_knobs[i];
-    if( knob_status[knob_id] == UNCALIBRATED )
-      uncalibrated_knobs += 1;
-  }
-  if( uncalibrated_knobs == 0 )
-    status = WORKING;
   
   // WORKING
   if( status == WORKING ){
     if( spin_counter % data_publisher_spin_range == 0 ){
       // it is time to publish the configuration of the axis
-      request_packet_t pk;
+      data_packet_t pk;
+      data_payload_data_t pk_payload;
+      // fill in header
       pk.header.seq = packet_header_seq;
-//      pk.header.stamp = ((uint32_t) millis());
-//      pk.
-      debug_fcn();
-
+      pk.header.type = DATA;
+      pk.header.checksum = -1; //TODO
+      // fill in payload
+      pk_payload.axis_x = knob_value[0];
+      pk_payload.axis_y = knob_value[1];
+      pk_payload.axis_z = knob_value[2];
+      pk_payload.axis_r = knob_value[3];
+      pk_payload.axis_p = knob_value[4];
+      pk_payload.axis_w = knob_value[5];
+      // attach payload to packet
+      memcpy( pk.payload, &pk_payload, sizeof(pk_payload) );
+      // publish packet
+      //TODO
       
+//      debug_fcn();
+
+//      Serial.println( sizeof pk_payload );
 
       packet_header_seq += 1;
     }
@@ -300,19 +354,20 @@ void loop() {
 void process_incoming_byte( const byte inByte ){
   static char input_line[serial_input_max_num_bytes];
   static unsigned int input_pos = 0;
-  switch (inByte){
-    case '\n':   // end of text
+  switch( inByte ){
+    case '\n': // terminator reached!
       input_line[input_pos] = 0;  // terminating null byte
-      // terminator reached! process input_line here ...
       process_request( input_line );
       // reset buffer for next time
       input_pos = 0;  
       break;
-    case '\r':   // discard carriage return
+    case '\r': // discard carriage return
       break;
     default:
-      // keep adding if not full ... allow for terminating null byte
-      if( input_pos < (serial_input_max_num_bytes - 1) )
+//      Serial.print( ' ' );
+//      Serial.print( inByte );
+      // keep adding if not full
+      if( input_pos < (serial_input_max_num_bytes-1) )
         input_line[input_pos] = inByte;
         input_pos += 1;
       break;
@@ -320,13 +375,74 @@ void process_incoming_byte( const byte inByte ){
 }//process_incoming_byte
 
 void process_request( const char request[] ){
-  char buf[128];
-  snprintf( buf, sizeof buf, "%s%s", "RECEIVED: ", request );
-  Serial.println(buf);
+  memcpy(&inbound_packet, request, sizeof(inbound_packet));
+  // analyze id of requested operation
+  switch( inbound_packet.header.operation ){
+    case NOOP:
+      // nothing to do
+      break;
+      //
+    case RESET_COMM:
+      request_reset_comm();
+      break;
+      //
+    case INITIALIZE:
+      request_payload_initialize_t init_payload;
+      memcpy(&init_payload, inbound_packet.payload, sizeof(init_payload));
+      request_initialize( init_payload );
+      break;
+      //
+    case RECALIBRATE:
+      request_payload_recalibrate_t recalib_payload;
+      memcpy(&recalib_payload, inbound_packet.payload, sizeof(recalib_payload));
+      request_recalibrate( recalib_payload );
+      break;
+      //
+    case SHUTDOWN:
+      request_shutdown();
+      break;
+  }
+  //TODO: log back to external device for now
+  char buf[22];
+  snprintf( buf, sizeof buf, "%s sq:%d op:%d ck:%d", "IN", inbound_packet.header.seq, inbound_packet.header.operation, inbound_packet.header.checksum );
+  log_to_serial( INFO, buf );
 }//process_request
 
+void request_reset_comm(){
+  //TODO
+  if( DEBUG )
+    log_to_serial( INFO, "Received a RESET_COMM request" );
+}
+
+void request_initialize( request_payload_initialize_t request ){
+  //TODO 
+  if( DEBUG )
+    log_to_serial( INFO, "Received a INITIALIZE request" );
+  // initialize device
+  
+}
+
+void request_recalibrate( request_payload_recalibrate_t request ){
+  //TODO
+  if( DEBUG )
+    log_to_serial( INFO, "Received a RECALIBRATE request" );
+}
+
+void request_shutdown(){
+  if( DEBUG )
+    log_to_serial( INFO, "Received a SHUTDOWN request" );
+  // shutdown the device
+  shutdown_fcn();
+}
+
+
+
+
 void debug_fcn(){
-  snprintf(strbuf, sizeof strbuf, "%s", "Calibrator9000 :: ");
+  if( spin_counter % data_publisher_spin_range != 0 ){
+    return; // it is not time to publish debug info
+  }
+  snprintf(strbuf, sizeof strbuf, "%s", "Axes: ");
   for( int i = 0; i < num_active_knobs; i++ ){
     int knob_id = active_knobs[i];
     if( i > 0 ){
@@ -335,19 +451,19 @@ void debug_fcn(){
     if( knob_status[knob_id] == UNCALIBRATED ){
       snprintf(
         strbuf, sizeof strbuf, 
-        "%s%s%c%s(%d)", 
-        strbuf, "AXIS_", knob_var_name[knob_id], "=UNCAL", knob_calibration_timer_counters[knob_id] 
+        "%s%c%s(%d)", 
+        strbuf, knob_var_name[knob_id], "=U", knob_calibration_timer_counters[knob_id] 
       );
     }else{
       snprintf(
         strbuf, sizeof strbuf, 
-        "%s%s%c%s%s", 
-        strbuf, "AXIS_", knob_var_name[knob_id], "=", sfloat(knob_value[knob_id])
+        "%s%c%s%s", 
+        strbuf, knob_var_name[knob_id], "=", sfloat(knob_value[knob_id])
       );
     }
   }
   snprintf( strbuf, sizeof strbuf, "%s%c", strbuf, '\n' );
-  Serial.print(strbuf);
+  log_to_serial( INFO, strbuf );
 }//debug_fcn
 
 char* sfloat( float floatValue ){
@@ -361,7 +477,6 @@ char* sfloat( float floatValue ){
 }//sfloat
 
 void animate_led( int led_id, enum LED_STATUS led_status ){
-  int led_pwm_high = 255;
   // OFF
   int pwm_value = 0;
   // FIX
@@ -382,9 +497,9 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
     int animation_step = spin_counter % blink_range;
     int animation_mid = int( ((float)blink_range) / 2.0f );
     if( animation_step <= animation_mid ){
-      pwm_value = map( animation_step, 0, animation_mid, 0, 255 );
+      pwm_value = map( animation_step, 0, animation_mid, 0, led_pwm_high );
     }else{
-      pwm_value = map( animation_step, animation_mid, blink_range, 255, 0 );
+      pwm_value = map( animation_step, animation_mid, blink_range, led_pwm_high, 0 );
     }
   }
   // write the signal to the PWM ports
@@ -395,3 +510,36 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
     analogWrite(port_id, pwm_value);
   }
 }//animate_led
+
+void log_to_serial( int level, char* message ){
+  data_packet_t pk;
+  data_payload_log_t pk_payload;
+  // fill in header
+  pk.header.seq = packet_header_seq;
+  pk.header.type = LOG;
+  pk.header.checksum = -1; //TODO
+  // fill in payload
+  strncpy(pk_payload.message, message, min(sizeof(pk_payload.message), strlen(message)+1));
+  pk_payload.length = uint8_t( strlen(message) );
+  pk_payload.level = uint8_t(level);
+  memcpy(pk.payload, (const unsigned char*)&pk_payload, sizeof(pk.payload));
+  // publish packet
+  send_packet_to_serial( pk );
+}//log_to_serial
+
+void send_packet_to_serial( data_packet_t packet ){
+  // convert packet into sequence of bytes
+  char* byte_buf = (char*) malloc( sizeof(packet) );
+  memcpy(byte_buf, (const char*)&packet, sizeof(packet));
+  byte_buf[ sizeof(packet)-1 ] = '\n';
+  // publish packet
+  Serial.write( byte_buf, sizeof(packet) );
+  // free memory
+  free(byte_buf);
+  // increase seq counter
+  packet_header_seq += 1;
+}//send_packet_to_serial
+
+void reboot_fcn(){
+  //TODO: connect the RST port of the board to a GPIO port (e.g., 7) and set it to HIGH to reboot the board
+}//reboot_fcn
