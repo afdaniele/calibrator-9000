@@ -1,7 +1,7 @@
 import time
 import serial
 import struct
-from enum import Enum
+from enum import IntEnum
 
 
 # // device status
@@ -24,7 +24,7 @@ from enum import Enum
 # // command request
 # enum COMMAND_REQUEST_OP{  // this has size int16_t
 #   NOOP = 0,
-#   RESET_COMM = 1,
+#   RESET = 1,
 #   INITIALIZE = 2,
 #   RECALIBRATE = 3,
 #   SHUTDOWN = 4
@@ -123,26 +123,29 @@ from enum import Enum
 #   ERROR = 2
 # };
 
+
+
+
 frequency = 40.0
 
 request_packet_t = "<Ihh16s"
 request_payload_noop_t = "<16s"
-request_payload_resetcomm_t = "<16s"
+request_payload_reset_t = "<16s"
 request_payload_initialize_t = "<BBBBBB10s"
 request_payload_recalibrate_t = "<BBBBBB10s"
 request_payload_shutdown_t = "<16s"
 
 
-class RequestOperation(Enum):
+class RequestOperation(IntEnum):
     NOOP = 0,
-    RESET_COMM = 1,
+    RESET = 1,
     INITIALIZE = 2,
     RECALIBRATE = 3,
     SHUTDOWN = 4
 
 request_payload_map = {
     0 : request_payload_noop_t,
-    1 : request_payload_resetcomm_t,
+    1 : request_payload_reset_t,
     2 : request_payload_initialize_t,
     3 : request_payload_recalibrate_t,
     4 : request_payload_shutdown_t
@@ -154,18 +157,29 @@ data_payload_status_t = "<hBBBBBBBBBBBB10s"
 data_payload_data_t = "<ffffff"
 data_payload_log_t = "<BB22s"
 
+class DataType(IntEnum):
+    EMPTY = 0,
+    STATUS = 1,
+    DATA = 2,
+    LOG = 3
+
 data_payload_map = {
-    0 : data_payload_empty_t,
-    1 : data_payload_status_t,
-    2 : data_payload_data_t,
-    3 : data_payload_log_t
+    DataType.EMPTY : data_payload_empty_t,
+    DataType.STATUS : data_payload_status_t,
+    DataType.DATA : data_payload_data_t,
+    DataType.LOG : data_payload_log_t
 }
 
-data_payload_log_level_map = {
-    0 : 'INFO',
-    1 : 'WARN',
-    2 : 'ERROR'
-}
+class LogLevel(IntEnum):
+    INFO = 0,
+    WARN = 1,
+    ERROR = 2
+
+log_levels_enabled = [
+    # LogLevel.INFO,
+    LogLevel.WARN,
+    LogLevel.ERROR
+]
 
 def data_payload_empty_handler( payload ):
     return None
@@ -182,7 +196,7 @@ def data_payload_log_handler( payload ):
         print "[WARN]\t:: Invalid packet of type 'LOG' received"
         return
     _, level, message = payload
-    print "[%s]\t:: %s|" % ( data_payload_log_level_map[level], message.rstrip() )
+    print "[%s]\t:: %s" % ( LogLevel(level).name, message.rstrip() )
 
 data_payload_handler_map = {
     0 : data_payload_empty_handler,
@@ -198,7 +212,12 @@ bytestr = struct.pack(
     0,
     RequestOperation.INITIALIZE,
     -1,
-    str(bytearray([0x02]*16))
+    struct.pack(
+        request_payload_initialize_t,
+        1, 0, 1, 1, 0, 0,
+        str(bytearray([0x02]*10))
+    )
+    # str(bytearray([0x02]*10))
 )
 
 

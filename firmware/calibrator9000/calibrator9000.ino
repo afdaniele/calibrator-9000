@@ -13,6 +13,7 @@ const int adc_bits_resolution = 8;
 const unsigned int serial_input_max_num_bytes = 33;
 const int knob_calibration_time_secs = 2;
 const bool potentiometer_inverted = true;
+const int RST_port_id = 7;
 const int led_pwm_high = 255;
 const int num_knobs = 6;
 int knob_raw_value[num_knobs];
@@ -82,7 +83,7 @@ enum LED_STATUS{
 // command request
 enum COMMAND_REQUEST_OP{  // this has size int16_t
   NOOP = 0,
-  RESET_COMM = 1,
+  RESET = 1,
   INITIALIZE = 2,
   RECALIBRATE = 3,
   SHUTDOWN = 4
@@ -177,7 +178,7 @@ typedef struct {
 // log levels
 enum LOG_LEVEL{  // this has size int16_t
   INFO = 0,
-  WARNING = 1,
+  WARN = 1,
   ERROR = 2
 };
 
@@ -211,14 +212,6 @@ void setup() {
   }
   // configure ADC
   analogReadResolution(adc_bits_resolution);
-  
-  
-  // TODO: read this from serial
-  active_knobs[0] = 0;
-  active_knobs[1] = 1;
-  active_knobs[2] = 2;
-  active_knobs[3] = 3;
-  num_active_knobs = 4;
   // configure RGB PWM ports
   for( int i = 0; i < num_knobs; i++ ){
     for( int j = 0; j < 3; j++ ){
@@ -228,8 +221,17 @@ void setup() {
       pinMode(port_id, OUTPUT);
     }
   }
-  // set next state
-  status = CALIBRATING;
+  
+  
+  
+//  // TODO: read this from serial
+//  active_knobs[0] = 0;
+//  active_knobs[1] = 1;
+//  active_knobs[2] = 2;
+//  active_knobs[3] = 3;
+//  num_active_knobs = 4;
+//  // set next state
+//  status = CALIBRATING;
   
 }//setup
 
@@ -382,8 +384,8 @@ void process_request( const char request[] ){
       // nothing to do
       break;
       //
-    case RESET_COMM:
-      request_reset_comm();
+    case RESET:
+      request_reset();
       break;
       //
     case INITIALIZE:
@@ -402,35 +404,41 @@ void process_request( const char request[] ){
       request_shutdown();
       break;
   }
-  //TODO: log back to external device for now
-  char buf[22];
-  snprintf( buf, sizeof buf, "%s sq:%d op:%d ck:%d", "IN", inbound_packet.header.seq, inbound_packet.header.operation, inbound_packet.header.checksum );
-  log_to_serial( INFO, buf );
 }//process_request
 
-void request_reset_comm(){
-  //TODO
+void request_reset(){
   if( DEBUG )
-    log_to_serial( INFO, "Received a RESET_COMM request" );
+    log_to_serial( WARN, "Received a RESET request" );
+  reboot_fcn();
 }
 
 void request_initialize( request_payload_initialize_t request ){
   //TODO 
   if( DEBUG )
-    log_to_serial( INFO, "Received a INITIALIZE request" );
+    log_to_serial( WARN, "Received a INITIALIZE request" );
   // initialize device
-  
+  int j = 0;
+  uint8_t* enable_req = (uint8_t*) &request;
+  for( int i = 0; i < num_knobs; i++ ){
+    if( enable_req[i] == 1 ){
+      active_knobs[j] = i;
+      j += 1;
+    }
+  }
+  num_active_knobs = j;
+  // set next state
+  status = CALIBRATING;
 }
 
 void request_recalibrate( request_payload_recalibrate_t request ){
   //TODO
   if( DEBUG )
-    log_to_serial( INFO, "Received a RECALIBRATE request" );
+    log_to_serial( WARN, "Received a RECALIBRATE request" );
 }
 
 void request_shutdown(){
   if( DEBUG )
-    log_to_serial( INFO, "Received a SHUTDOWN request" );
+    log_to_serial( WARN, "Received a SHUTDOWN request" );
   // shutdown the device
   shutdown_fcn();
 }
@@ -541,5 +549,10 @@ void send_packet_to_serial( data_packet_t packet ){
 }//send_packet_to_serial
 
 void reboot_fcn(){
+  // configure RST port
+  delay(1000);
+  pinMode(RST_port_id, OUTPUT);
+  digitalWrite(RST_port_id, HIGH);
+  delay(1000);
   //TODO: connect the RST port of the board to a GPIO port (e.g., 7) and set it to HIGH to reboot the board
 }//reboot_fcn
