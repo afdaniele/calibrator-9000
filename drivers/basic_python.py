@@ -125,15 +125,22 @@ from enum import IntEnum
 
 
 
-
+DEBUG = False
 frequency = 40.0
 
-request_packet_t = "<Ihh16s"
+request_packet_t = "<BIBBB16s"
 request_payload_noop_t = "<16s"
 request_payload_reset_t = "<16s"
 request_payload_initialize_t = "<BBBBBB10s"
 request_payload_recalibrate_t = "<BBBBBB10s"
 request_payload_shutdown_t = "<16s"
+
+
+
+request_packet_t = "<BIBBB6s"
+request_payload_initialize_t = "<BBBBBB"
+
+
 
 
 class RequestOperation(IntEnum):
@@ -157,18 +164,17 @@ data_payload_status_t = "<hBBBBBBBBBBBB10s"
 data_payload_data_t = "<ffffff"
 data_payload_log_t = "<BB22s"
 
+
+data_packet_t = "<BIBBB255s"
+data_packet_header_t = "<BIBBB"
+data_payload_log_t = "<BB%ds"
+data_payload_log_metadata_bytes = 2
+
 class DataType(IntEnum):
     EMPTY = 0,
     STATUS = 1,
     DATA = 2,
     LOG = 3
-
-data_payload_map = {
-    DataType.EMPTY : data_payload_empty_t,
-    DataType.STATUS : data_payload_status_t,
-    DataType.DATA : data_payload_data_t,
-    DataType.LOG : data_payload_log_t
-}
 
 class LogLevel(IntEnum):
     INFO = 0,
@@ -181,21 +187,26 @@ log_levels_enabled = [
     LogLevel.ERROR
 ]
 
-def data_payload_empty_handler( payload ):
+def data_payload_empty_handler( header, payload_str ):
     return None
 
-def data_payload_status_handler( payload ):
+def data_payload_status_handler( header, payload_str ):
     return None
 
-def data_payload_data_handler( payload ):
+def data_payload_data_handler( header, payload_str ):
     return None
 
-def data_payload_log_handler( payload ):
+def data_payload_log_handler( header, payload_str ):
+    payload_mask = data_payload_log_t % (header[3]-data_payload_log_metadata_bytes)
+
+    print len(payload_str)
+
+    payload_tuple = struct.unpack( payload_mask, payload_str )
     # print payload
-    if len(payload) != 3:
+    if len(payload_tuple) != 3:
         print "[WARN]\t:: Invalid packet of type 'LOG' received"
         return
-    _, level, message = payload
+    level, message_size, message = payload_tuple
     print "[%s]\t:: %s" % ( LogLevel(level).name, message.rstrip() )
 
 data_payload_handler_map = {
@@ -209,15 +220,15 @@ data_payload_handler_map = {
 
 bytestr = struct.pack(
     request_packet_t,
+    89,
     0,
     RequestOperation.INITIALIZE,
-    -1,
+    struct.calcsize( request_payload_initialize_t ),
+    101,
     struct.pack(
         request_payload_initialize_t,
-        1, 0, 1, 1, 0, 0,
-        str(bytearray([0x02]*10))
+        0, 1, 1, 1, 0, 0
     )
-    # str(bytearray([0x02]*10))
 )
 
 
@@ -236,13 +247,16 @@ ser.write( bytestr + '\n' )
 while True:
     if ser.inWaiting() > 0:
         str_in = ser.readline()
+        if DEBUG: print "LINE[%s]" % str_in.strip()
         # check the size of the packet
-        if len(str_in) == struct.calcsize( data_packet_t ):
-            seq, type, checksum, payload = struct.unpack( data_packet_t, str_in )
-            if type in data_payload_map:
-                payload_mask = data_payload_map[type]
-                payload_tuple = struct.unpack( payload_mask, payload )
-                payload_handler = data_payload_handler_map[type]
-                payload_handler( payload_tuple )
+        # if len(str_in) == struct.calcsize( data_packet_t ):
+        if len(str_in) >= struct.calcsize( data_packet_header_t ):
+            str_in_header = str_in[0 : struct.calcsize(data_packet_header_t)]
+            str_in_payload = str_in[struct.calcsize(data_packet_header_t) : ]
+            header_tuple = struct.unpack( data_packet_header_t, str_in_header )
+            package_type = header_tuple[2]
+            if package_type in data_payload_handler_map:
+                payload_handler = data_payload_handler_map[ package_type ]
+                payload_handler( header_tuple, str_in_payload.rstrip() )
 
     time.sleep( 1.0/frequency )
