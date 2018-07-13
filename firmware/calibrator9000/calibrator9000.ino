@@ -1,4 +1,16 @@
-#include<SPIMemory.h>
+#include <SPI.h>
+#include <Adafruit_SPIFlash.h>
+#include <Adafruit_SPIFlash_FatFs.h>
+
+// configuration of the flash chip pins
+#define FLASH_TYPE     SPIFLASHTYPE_W25Q16BV  // Flash chip type.
+#define FLASH_SS       SS1                    // Flash chip SS pin.
+#define FLASH_SPI_PORT SPI1                   // SPI port the Flash is connected to
+#define NEOPIN         40
+
+// create SPI Flash memory
+Adafruit_SPIFlash flash(FLASH_SS, &FLASH_SPI_PORT);     // Use hardware SPI
+Adafruit_W25Q16BV_FatFs fatfs(flash);
 
 #if defined(ARDUINO_SAMD_ZERO) && defined(SERIAL_PORT_USBVIRTUAL)
   // Required for Serial on Zero based boards
@@ -6,16 +18,16 @@
 #endif
 
 // debug variables
-const bool DEBUG = true;
-
-SPIFlash flash(39, &SPI1);
+const bool _DEBUG = true;
+const bool _FORCE_CALIBRATION = false;
 
 // define constants
 const float frequency = 100.0;      // the firmware runs at 100Hz
-const float data_frequency = 30.0;  // the firmware spits data at 30Hz
+const float data_frequency = 2.0;  // the firmware spits data at 30Hz
 const int adc_bits_resolution = 12;
 const unsigned int serial_input_max_num_bytes = 256;
-const int knob_calibration_time_secs = 2;
+const int knob_init_time_secs = 2;
+const int knob_calib_time_secs = 2;
 const bool potentiometer_inverted = true;
 const int RST_port_id = 7;
 const int led_pwm_high = 255;
@@ -24,16 +36,17 @@ const int smooth_history_size = 10;
 int knob_raw_value[num_knobs];
 int knob_raw_history[num_knobs][smooth_history_size];
 int knob_raw_history_total[num_knobs];
-float knob_value[num_knobs];
 int knob_zero_value[num_knobs];
+float knob_value[num_knobs];
 int active_knobs[num_knobs];
 int num_active_knobs = 0;
 
 // computable parameters
 const int data_publisher_spin_range = ((int) frequency / data_frequency );
 const int potentiometer_max_value = ((int) pow(2,adc_bits_resolution));
-const float knob_calibration_dead_zone_center = ((float)potentiometer_max_value) / 2.0;    // center of range
-const float knob_calibration_dead_zone_extension = 0.1 * ((float)potentiometer_max_value); // 10% of range
+const float knob_init_dead_zone_center = ((float)potentiometer_max_value) / 2.0;      // center of range
+const float knob_init_dead_zone_extension = 0.1 * ((float)potentiometer_max_value);   // 10% of the range
+const float knob_calib_zone_extension = 0.1 * ((float)potentiometer_max_value);  // 10% of the range
 
 // ADC ports used to read the potentiometers
 //int knob_adc_port[] = {A0, A1, A2, A3, A4, A5};
@@ -64,18 +77,21 @@ int knob_color_port[][3] = {
 
 // knob status
 enum KNOB_STATUS{
-  UNUSED = -2,
-  UNCALIBRATED = -1,
-  READY = 0
+  UNUSED = -1,
+  UNCALIBRATED = 0,
+  UNITIALIZED = 1,
+  READY = 2
 };
 enum KNOB_STATUS knob_status[num_knobs];
 
 // device status
 enum STATUS{
-  UNCONFIGURED = -1,
-  FAILURE = -2,
-  WORKING = 0,
-  CALIBRATING = 1
+  FAILURE = -3,
+  UNCONFIGURED = -2,
+  CALIBRATING = -1,
+  CALIBRATED = 0,
+  INITIALIZING = 1,
+  WORKING = 2,
 };
 enum STATUS status = UNCONFIGURED;
 
@@ -84,7 +100,9 @@ enum LED_STATUS{
   OFF = -1,
   FIX = 0,
   BLINK = 1,
-  BLINK_FAST = 2
+  BLINK_FAST = 2,
+  BLINK_CALIB_LOWER_BOUND = 3,
+  BLINK_CALIB_UPPER_BOUND = 4
 };
 
 // command request
@@ -159,12 +177,12 @@ typedef struct {
   uint8_t enabled_r;
   uint8_t enabled_p;
   uint8_t enabled_w;
-  uint8_t calibrated_x;
-  uint8_t calibrated_y;
-  uint8_t calibrated_z;
-  uint8_t calibrated_r;
-  uint8_t calibrated_p;
-  uint8_t calibrated_w;
+  uint8_t initialized_x;
+  uint8_t initialized_y;
+  uint8_t initialized_z;
+  uint8_t initialized_r;
+  uint8_t initialized_p;
+  uint8_t initialized_w;
 } __attribute__((__packed__)) data_payload_status_t;
 
 typedef struct {
@@ -198,10 +216,20 @@ enum LOG_LEVEL{  // this has size int16_t
   ERROR = 2
 };
 
+
+#pragma pack(push, 1)
+// calibration struct
+typedef struct {
+  uint16_t min_val[num_knobs];
+  uint16_t max_val[num_knobs];
+} __attribute__((__packed__)) calibration_data_t;
+#pragma pack(pop)
+
 // compute knob calibration dead zone limits and timer counter
-int knob_calibration_lower_limit = knob_calibration_dead_zone_center - knob_calibration_dead_zone_extension;
-int knob_calibration_upper_limit = knob_calibration_dead_zone_center + knob_calibration_dead_zone_extension;
-const int knob_calibration_time_steps = ((int)knob_calibration_time_secs*frequency);
+int knob_init_lower_limit = knob_init_dead_zone_center - knob_init_dead_zone_extension;
+int knob_init_upper_limit = knob_init_dead_zone_center + knob_init_dead_zone_extension;
+const int knob_init_time_steps = ((int)knob_init_time_secs*frequency);
+const int knob_calib_time_steps = ((int)knob_calib_time_secs*frequency);
 
 // spin counter used for animations
 int spin_counter = 0;
@@ -211,10 +239,14 @@ int smooth_history_idx = 0;
 // temporary buffers
 char strbuf[250];
 char sfloat_buf[10];
+char last_error_buf[250];
 char input_line_buf[serial_input_max_num_bytes];
-int knob_calibration_timer_counters[num_knobs];
+int knob_init_timer_counters[num_knobs];
+int knob_calib_timer_counters[num_knobs];
 uint32_t packet_header_seq = 0;
 int inbound_buf_pos = 0;
+File calibFile;
+char* calibFile_path = "/calibration.dat";
 
 // temporary structures
 // inbound packet and payloads
@@ -226,11 +258,42 @@ data_packet_t outbound_packet;
 data_payload_status_t outbound_status_payload;
 data_payload_log_t outbound_log_payload;
 data_payload_data_t outbound_data_payload;
+// device calibration
+calibration_data_t device_calib;
+
+// device STATUS to string
+const char* get_device_status_name(int16_t device_status){
+   switch( device_status ){
+      case FAILURE: return "FAILURE";
+      case UNCONFIGURED: return "UNCONFIGURED";
+      case CALIBRATING: return "CALIBRATING";
+      case CALIBRATED: return "CALIBRATED";
+      case INITIALIZING: return "INITIALIZING";
+      case WORKING: return "WORKING";
+      default: return "UNKNOWN";
+   }
+}//get_device_status_name
+
+// KNOB_STATUS to string
+const char* get_knob_status_name(int16_t knob_status){
+   switch( knob_status ){
+      case UNUSED: return "UNUSED";
+      case UNCALIBRATED: return "UNCALIBRATED";
+      case UNITIALIZED: return "UNITIALIZED";
+      case READY: return "READY";
+      default: return "UNKNOWN";
+   }
+}//get_knob_status_name
 
 // setup code, runs once
 void setup() {
   // initialize serial port 
   Serial.begin(9600);
+  while (!Serial){
+    delay(100);
+  }
+  // reset calibration
+  reset_calibration();
   // initialize knobs buffer
   for( int i = 0; i < num_knobs; i++ ){
     knob_value[i] = 0.0;
@@ -242,6 +305,8 @@ void setup() {
     for( int j = 0; j < smooth_history_size; j++ ){
       knob_raw_history[i][j] = 0;
     }
+    device_calib.min_val[i] = 0;
+    device_calib.max_val[i] = potentiometer_max_value;
   }
   // configure ADC
   analogReadResolution(adc_bits_resolution);
@@ -257,8 +322,101 @@ void setup() {
   // fill in constant data for outbound packet
   outbound_packet.header.BOS = (uint8_t) DATA_BOS;
   outbound_packet.header.EOS = (uint8_t) DATA_EOS;
+  // initialize SPI Flash chip
+  if( !flash.begin(FLASH_TYPE) ){
+    // switch to FAILURE mode
+    log_to_serial(ERROR, "Error, failed to initialize flash chip!");
+    status = FAILURE;
+    return;
+  }
+  log_to_serial(INFO, "Flash chip initialized!");
+  // mount the FAT filesystem
+  if( !fatfs.begin() ){
+    // switch to FAILURE mode
+    log_to_serial(ERROR, "Error, failed to mount filesystem!");
+    status = FAILURE;
+    return;
+  }
+  log_to_serial(INFO, "FAT filesystem mounted successfully!");
 
-  flash.begin(MB(1));
+  // calibration
+  if( _FORCE_CALIBRATION ){
+    log_to_serial(WARN, "Override: _FORCE_CALIBRATION is True.");
+    // reset calibration
+    reset_calibration();
+    // switch to CALIBRATION mode
+    log_to_serial(WARN, "Status change: -> CALIBRATING");
+    status = CALIBRATING;
+  }else{
+    // check if the calibration file exists
+    if( !fatfs.exists(calibFile_path) ){
+      log_to_serial(WARN, "No calibration file found, recalibrating now!");
+      // reset calibration
+      reset_calibration();
+      // switch to CALIBRATION mode
+      log_to_serial(WARN, "Status change: -> CALIBRATING");
+      status = CALIBRATING;
+      
+  
+  //    //TODO:==> fake calibration
+  //    calibFile = fatfs.open(calibFile_path, FILE_WRITE);
+  //    if (!calibFile) {
+  //      log_to_serial(ERROR, "Error, failed to open calibration file for writing!");
+  //      while(1);
+  //    }
+  //    log_to_serial(INFO, "Opened calibration file, writing...");
+  //    // write fake calibration struct
+  //    device_calib.min_val[0] = 23;
+  //    device_calib.max_val[5] = 76;
+  //    // write fake struct to disk
+  //    int calib_size = sizeof(device_calib);
+  //    
+  ////    char* byte_buf = (char*) malloc( calib_size );
+  ////    memcpy(byte_buf, (const byte*)&device_calib, calib_size);
+  //    
+  //    // dump bytes
+  //    calibFile.write( (const byte*) &device_calib, calib_size );
+  //    calibFile.flush();
+  //    calibFile.close();
+  //    log_to_serial(INFO, "Calibration file wrote!");
+  //    //TODO:<== fake calibration
+      
+      
+    }else{
+      log_to_serial(INFO, "Calibration file found, accessing now!");
+      calibFile = fatfs.open(calibFile_path, FILE_READ);
+      if (!calibFile) {
+        // switch to FAILURE mode
+        log_to_serial(ERROR, "Error, failed to open calibration file for reading!");
+        status = FAILURE;
+        return;
+      }
+      log_to_serial(INFO, "Opened calibration file, reading...");
+      // read calibration struct
+  
+  //    device_calib.min_val[0] = 0;
+  //    device_calib.max_val[5] = 0;
+      
+  
+      calibFile.read( &device_calib, sizeof(device_calib) );
+  
+  //    char buf[80];
+  //    snprintf( buf, sizeof buf, "Calib: x_min=%d, w_max=%d", device_calib.min_val[0], device_calib.max_val[5] );
+  //    log_to_serial( INFO, buf );
+  
+      calibFile.close();
+  
+      log_to_serial(INFO, "Calibration loaded!");
+      
+      // switch to CALIBRATED mode
+      log_to_serial(WARN, "Status change: -> CALIBRATED");
+      status = CALIBRATED;
+    }
+  }
+  
+
+  
+  
 }//setup
 
 // this function stops the firmware and halts the device
@@ -269,12 +427,12 @@ void loop() {
   // if somebody is talking to the firmware over USBSerial
   while( Serial.available () > 0 )
     process_incoming_byte( Serial.read() );
-    
-  // FAILURE
+  // FAILURE mode
   if( status == FAILURE ){
-    return;  
+    // TODO: keep publishing the message in last_error_buf, maybe start blinking the red knob
+    log_to_serial( ERROR, last_error_buf );
+    return;
   }
-  
   // read knob values
   for( int i = 0; i < num_active_knobs; i++ ){
     // get the ID of the current knob and its port
@@ -293,39 +451,113 @@ void loop() {
     if( potentiometer_inverted ){
       knob_raw_value[knob_id] = potentiometer_max_value - knob_raw_value[knob_id];
     }
-    // if the knob is calibrated, compute the value in the range [-1,1]
+    // if the knob is initialized, compute the value in the range [-1,1]
     if( knob_status[knob_id] == READY ){
       float knob_relative_value = ((float)knob_raw_value[knob_id] - knob_zero_value[knob_id]);
       knob_value[knob_id] = knob_relative_value / ((float) max(knob_zero_value[knob_id], potentiometer_max_value-knob_zero_value[knob_id]));
     }
   }
   
-  // DEBUG only
-  if( DEBUG ){
+  // _DEBUG only
+  if( _DEBUG ){
     debug_fcn();
-
-//    char buf[40];
-//    int cap = (int)flash.getCapacity();
-//    snprintf( buf, sizeof buf, "%s %d", "Flash", -23 );
-//    log_to_serial( INFO, buf );
   }
-  
+
   // CALIBRATION
   if( status == CALIBRATING ){
     // check which knob is not calibrated yet
     for( int i = 0; i < num_active_knobs; i++ ){
       int knob_id = active_knobs[i];
+      if( knob_status[knob_id] == UNITIALIZED ) continue;
+      //
+      if( device_calib.min_val[knob_id] != potentiometer_max_value ){
+        // lower bound calibrated, now calibrate upper bound
+        if( knob_raw_value[knob_id] < potentiometer_max_value - knob_calib_zone_extension ){
+          // found uncalibrated upper bound
+          knob_calib_timer_counters[knob_id] = 0;
+          // blink uncalibrated knob
+          animate_led( knob_id, BLINK_CALIB_UPPER_BOUND );
+        }else{
+          knob_calib_timer_counters[knob_id] += 1;
+          if( knob_calib_timer_counters[knob_id] >= knob_calib_time_steps ){
+            knob_calib_timer_counters[knob_id] = 0;
+            device_calib.max_val[knob_id] = (uint16_t) knob_raw_value[knob_id];
+            knob_status[knob_id] = UNITIALIZED;
+            animate_led( knob_id, OFF );  // show that the lower bound was calibrated
+          }else{
+            animate_led( knob_id, FIX ); // show that the knob is being calibrated
+          }
+        }
+      }else{
+        // calibrating lower bound
+        if( knob_raw_value[knob_id] > knob_calib_zone_extension ){
+          // found uncalibrated lower bound
+          knob_calib_timer_counters[knob_id] = 0;
+          // blink uncalibrated knob
+          animate_led( knob_id, BLINK_CALIB_LOWER_BOUND );
+        }else{
+          knob_calib_timer_counters[knob_id] += 1;
+          if( knob_calib_timer_counters[knob_id] >= knob_calib_time_steps ){
+            knob_calib_timer_counters[knob_id] = 0;
+            device_calib.min_val[knob_id] = (uint16_t) knob_raw_value[knob_id];
+            animate_led( knob_id, OFF );  // show that the lower bound was calibrated
+          }else{
+            animate_led( knob_id, FIX ); // show that the knob is being calibrated
+          }
+        } 
+      }
+    }
+
+    // switch state
+    int uncalibrated_knobs = 0;
+    for( int i = 0; i < num_active_knobs; i++ ){
+      int knob_id = active_knobs[i];
+      if( knob_status[knob_id] == UNCALIBRATED )
+        uncalibrated_knobs += 1;
+    }
+    if( uncalibrated_knobs == 0 ){
+      // store calibration
+      calibFile = fatfs.open(calibFile_path, FILE_WRITE);
+      if (!calibFile) {
+        log_to_serial(ERROR, "Error, failed to open calibration file for writing!");
+        status = FAILURE;
+        return;
+      }
+      log_to_serial(INFO, "Opened calibration file, writing...");
+      // write struct to disk
+      int calib_size = sizeof(device_calib);
+      
+      char* byte_buf = (char*) malloc( calib_size );
+      memcpy(byte_buf, (const byte*)&device_calib, calib_size);
+      
+      // dump bytes
+      calibFile.write( byte_buf, calib_size );
+      calibFile.flush();
+      calibFile.close();
+      log_to_serial(INFO, "Calibration file wrote!");
+    
+      // switch state
+      log_to_serial(WARN, "Status change: -> INITIALIZING");
+      status = INITIALIZING;
+    }
+  }
+  
+  // INITIALIZATION
+  if( status == INITIALIZING ){
+    // check which knob is not initialized yet
+    for( int i = 0; i < num_active_knobs; i++ ){
+      int knob_id = active_knobs[i];
       if( knob_status[knob_id] == READY ) continue;
-      if( knob_raw_value[knob_id] < knob_calibration_lower_limit || knob_raw_value[knob_id] > knob_calibration_upper_limit ){
-        // found uncalibrated knob       
-        knob_calibration_timer_counters[knob_id] = 0;
-        knob_status[knob_id] = UNCALIBRATED;
-        // blink uncalibrated knobs
+      if( knob_raw_value[knob_id] < knob_init_lower_limit || knob_raw_value[knob_id] > knob_init_upper_limit ){
+        // found uninitialized knob       
+        knob_init_timer_counters[knob_id] = 0;
+        knob_status[knob_id] = UNITIALIZED;
+        // blink uninitialized knobs
         animate_led( knob_id, BLINK );
       }else{
-        knob_calibration_timer_counters[knob_id] += 1;
-        if( knob_calibration_timer_counters[knob_id] >= knob_calibration_time_steps ){
-          knob_calibration_timer_counters[knob_id] = 0;
+        knob_init_timer_counters[knob_id] += 1;
+        if( knob_init_timer_counters[knob_id] >= knob_init_time_steps ){
+          knob_init_timer_counters[knob_id] = 0;
           knob_zero_value[knob_id] = knob_raw_value[knob_id];
           knob_status[knob_id] = READY;
           animate_led( knob_id, FIX );
@@ -335,14 +567,16 @@ void loop() {
       }
     }
     // switch state
-    int uncalibrated_knobs = 0;
+    int uninitialized_knobs = 0;
     for( int i = 0; i < num_active_knobs; i++ ){
       int knob_id = active_knobs[i];
-      if( knob_status[knob_id] == UNCALIBRATED )
-        uncalibrated_knobs += 1;
+      if( knob_status[knob_id] == UNITIALIZED )
+        uninitialized_knobs += 1;
     }
-    if( uncalibrated_knobs == 0 )
+    if( uninitialized_knobs == 0 ){
+      log_to_serial(WARN, "Status change: -> WORKING");
       status = WORKING;
+    }
   }
   
   // WORKING
@@ -452,14 +686,14 @@ void process_request( const char* request, int request_size ){
 }//process_request
 
 void request_reset(){
-  if( DEBUG )
+  if( _DEBUG )
     log_to_serial( WARN, "Received a RESET request" );
   reboot_fcn();
 }
 
 void request_initialize( request_payload_initialize_t* request ){
   //TODO 
-  if( DEBUG )
+  if( _DEBUG )
     log_to_serial( WARN, "Received a INITIALIZE request" );
   // initialize device
   int j = 0;
@@ -467,22 +701,38 @@ void request_initialize( request_payload_initialize_t* request ){
   for( int i = 0; i < num_knobs; i++ ){
     if( enable_req[i] == 1 ){
       active_knobs[j] = i;
+      knob_status[i] = (status == CALIBRATED)? UNITIALIZED : UNCALIBRATED;
       j += 1;
     }
   }
   num_active_knobs = j;
   // set next state
-  status = CALIBRATING;
+  if( status == CALIBRATED ){
+    log_to_serial(WARN, "Status change: -> INITIALIZING");
+    status = INITIALIZING;
+    log_to_serial( INFO, "Device initialized! Waiting for the knobs to be reset" );
+  }else{
+    log_to_serial(WARN, "Status change: -> CALIBRATING");
+    status = CALIBRATING;
+    log_to_serial( INFO, "Device uncalibrated! Waiting for the knobs to be calibrated" );
+  }
 }
 
 void request_recalibrate( request_payload_recalibrate_t* request ){
   //TODO
-  if( DEBUG )
+  if( _DEBUG )
     log_to_serial( WARN, "Received a RECALIBRATE request" );
+  // reset calibration
+  reset_calibration();
+  // set all knobs as uncalibrated
+  for( int i = 0; i < num_active_knobs; i++ ){
+    int knob_id = active_knobs[i];
+    knob_status[knob_id] = UNCALIBRATED;
+  }
 }
 
 void request_shutdown(){
-  if( DEBUG )
+  if( _DEBUG )
     log_to_serial( WARN, "Received a SHUTDOWN request" );
   // shutdown the device
   shutdown_fcn();
@@ -492,17 +742,31 @@ void debug_fcn(){
   if( spin_counter % data_publisher_spin_range != 0 ){
     return; // it is not time to publish debug info
   }
-  snprintf(strbuf, sizeof strbuf, "%s", "Axes: ");
+  // 1. send a packet with the status of the device and the status of each axis
+  snprintf( strbuf, sizeof strbuf, "STATUS: Device(%s); Axes: ", get_device_status_name(status) );
+  for( int knob_id = 0; knob_id < num_knobs; knob_id++ ){
+    if( knob_id > 0 ){
+      snprintf( strbuf, sizeof strbuf, "%s%s", strbuf, " | " );
+    }
+    snprintf(
+      strbuf, sizeof strbuf,
+      "%s%c(%s)", 
+      strbuf, knob_var_name[knob_id], get_knob_status_name( knob_status[knob_id] )
+    );
+  }
+  log_to_serial( INFO, strbuf );
+  // 2. send a packet with the configuration of the axis
+  snprintf(strbuf, sizeof strbuf, "%s", "AXES: ");
   for( int i = 0; i < num_active_knobs; i++ ){
     int knob_id = active_knobs[i];
     if( i > 0 ){
       snprintf(strbuf, sizeof strbuf, "%s%s", strbuf, " | ");
     }
-    if( knob_status[knob_id] == UNCALIBRATED ){
+    if( knob_status[knob_id] == UNITIALIZED || knob_status[knob_id] == UNCALIBRATED ){
       snprintf(
-        strbuf, sizeof strbuf, 
-        "%s%c%s(%d)", 
-        strbuf, knob_var_name[knob_id], "=U", knob_calibration_timer_counters[knob_id] 
+        strbuf, sizeof strbuf,
+        "%s%c%s(%d):%d", 
+        strbuf, knob_var_name[knob_id], "=U", knob_raw_value[knob_id], knob_init_timer_counters[knob_id] 
       );
     }else{
       snprintf(
@@ -511,6 +775,19 @@ void debug_fcn(){
         strbuf, knob_var_name[knob_id], "=", sfloat( knob_value[knob_id] )
       );
     }
+  }
+  log_to_serial( INFO, strbuf );
+  // 3. send a packet with the axis calibration
+  snprintf( strbuf, sizeof strbuf, "%s", "CALIBRATION: Axes: " );
+  for( int knob_id = 0; knob_id < num_knobs; knob_id++ ){
+    if( knob_id > 0 ){
+      snprintf( strbuf, sizeof strbuf, "%s%s", strbuf, " | " );
+    }
+    snprintf(
+      strbuf, sizeof strbuf,
+      "%s%c(%d-%d)",
+      strbuf, knob_var_name[knob_id], (int)device_calib.min_val[knob_id], (int)device_calib.max_val[knob_id]
+    );
   }
   log_to_serial( INFO, strbuf );
 }//debug_fcn
@@ -531,17 +808,22 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
   if( led_status == FIX ){
     pwm_value = led_pwm_high;
   }
-  // BLINK
-  int blink_range = 0;
-  if( led_status == BLINK ){
-    blink_range = 200;
-  }
-  // BLINK_FAST
-  if( led_status == BLINK_FAST ){
-    blink_range = 50;
-  }
+
+  
+//  // BLINK
+//  int blink_range = 0;
+//  if( led_status == BLINK ){
+//    blink_range = 200;
+//  }
+//  // BLINK_FAST
+//  if( led_status == BLINK_FAST ){
+//    blink_range = 50;
+//  }
+
+  
   // blink LED   
   if( led_status == BLINK || led_status == BLINK_FAST ){
+    int blink_range = (led_status == BLINK_FAST)? 50 : 200;
     int animation_step = spin_counter % blink_range;
     int animation_mid = int( ((float)blink_range) / 2.0f );
     if( animation_step <= animation_mid ){
@@ -549,6 +831,18 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
     }else{
       pwm_value = map( animation_step, animation_mid, blink_range, led_pwm_high, 0 );
     }
+  }
+  // blink LED in calibration mode (lower bound)
+  if( led_status == BLINK_CALIB_LOWER_BOUND ){
+    int animation_step = spin_counter % 200;
+    if( animation_step < 30 )
+      pwm_value = led_pwm_high;
+  }
+  // blink LED in calibration mode (upper bound)
+  if( led_status == BLINK_CALIB_UPPER_BOUND ){
+    int animation_step = spin_counter % 200;
+    if( animation_step < 30 || (animation_step > 50 && animation_step < 80) )
+      pwm_value = led_pwm_high;
   }
   // write the signal to the PWM ports
   for( int j = 0; j < 3; j++ ){
@@ -559,6 +853,15 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
   }
 }//animate_led
 
+void reset_calibration(){
+  // reset calibration
+  uint16_t* calib_values = (uint16_t*) &device_calib;
+  for( int i = 0; i < num_knobs; i++ ){
+    calib_values[i] = potentiometer_max_value;
+    calib_values[i+num_knobs] = 0;
+  }
+}
+
 void log_to_serial( int level, char* message ){
   uint8_t payload_metadata_size = (uint8_t) sizeof(outbound_log_payload)-1; // remove size of pointer to message
   // fill in header
@@ -567,6 +870,7 @@ void log_to_serial( int level, char* message ){
   // fill in payload
   outbound_log_payload.level = uint8_t(level);
   outbound_log_payload.message_size = uint8_t( min(strlen(message)+1, 255-payload_metadata_size) );
+//  outbound_log_payload.message_size = uint8_t( min(message_len+1, 255-payload_metadata_size) );
   // complete header
   outbound_packet.header.payload_size = payload_metadata_size + outbound_log_payload.message_size;
   // copy message into the payload object
@@ -575,6 +879,9 @@ void log_to_serial( int level, char* message ){
   memcpy(outbound_packet.payload, (const unsigned char*)&outbound_log_payload, outbound_packet.header.payload_size);
   // publish packet
   send_packet_to_serial( &outbound_packet );
+  // store latest error message
+  if( level == ERROR )
+    strncpy(last_error_buf, message, outbound_log_payload.message_size);
 }//log_to_serial
 
 void send_packet_to_serial( data_packet_t* packet ){
