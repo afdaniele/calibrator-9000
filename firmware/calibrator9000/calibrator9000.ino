@@ -171,18 +171,12 @@ typedef struct {
 
 typedef struct {
   int8_t device_status;
-  uint8_t enabled_x;
-  uint8_t enabled_y;
-  uint8_t enabled_z;
-  uint8_t enabled_r;
-  uint8_t enabled_p;
-  uint8_t enabled_w;
-  uint8_t initialized_x;
-  uint8_t initialized_y;
-  uint8_t initialized_z;
-  uint8_t initialized_r;
-  uint8_t initialized_p;
-  uint8_t initialized_w;
+  int8_t status_x;
+  int8_t status_y;
+  int8_t status_z;
+  int8_t status_r;
+  int8_t status_p;
+  int8_t status_w;
 } __attribute__((__packed__)) data_payload_status_t;
 
 typedef struct {
@@ -299,6 +293,7 @@ void setup() {
     knob_value[i] = 0.0;
     knob_raw_value[i] = -1;
     knob_raw_history_total[i] = 0;
+    knob_init_timer_counters[i] = 0;
     knob_zero_value[i] = -1;
     active_knobs[i] = -1;
     knob_status[i] = UNUSED;
@@ -425,7 +420,7 @@ void(* shutdown_fcn) (void) = 0;
 // put your main code here, to run repeatedly:
 void loop() {
   // if somebody is talking to the firmware over USBSerial
-  while( Serial.available () > 0 )
+  while( Serial.available() > 0 )
     process_incoming_byte( Serial.read() );
   // FAILURE mode
   if( status == FAILURE ){
@@ -582,7 +577,6 @@ void loop() {
   // WORKING
   if( status == WORKING ){
     if( spin_counter % data_publisher_spin_range == 0 ){ // it is time to publish the configuration of the axis
-      
       // fill in header
       outbound_packet.header.seq = packet_header_seq;
       outbound_packet.header.type = (uint8_t) DATA;
@@ -758,6 +752,7 @@ void debug_fcn(){
   // 2. send a packet with the configuration of the axis
   snprintf(strbuf, sizeof strbuf, "%s", "AXES: ");
   for( int i = 0; i < num_active_knobs; i++ ){
+    continue;
     int knob_id = active_knobs[i];
     if( i > 0 ){
       snprintf(strbuf, sizeof strbuf, "%s%s", strbuf, " | ");
@@ -808,19 +803,6 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
   if( led_status == FIX ){
     pwm_value = led_pwm_high;
   }
-
-  
-//  // BLINK
-//  int blink_range = 0;
-//  if( led_status == BLINK ){
-//    blink_range = 200;
-//  }
-//  // BLINK_FAST
-//  if( led_status == BLINK_FAST ){
-//    blink_range = 50;
-//  }
-
-  
   // blink LED   
   if( led_status == BLINK || led_status == BLINK_FAST ){
     int blink_range = (led_status == BLINK_FAST)? 50 : 200;
@@ -862,15 +844,18 @@ void reset_calibration(){
   }
 }
 
-void log_to_serial( int level, char* message ){
-  uint8_t payload_metadata_size = (uint8_t) sizeof(outbound_log_payload)-1; // remove size of pointer to message
+void log_to_serial( int level, const char* message ){
+  // trim whitespace from message
+  String msg = String(message);
+  msg.trim();
+  message = msg.c_str();
+  uint8_t payload_metadata_size = (uint8_t) sizeof(outbound_log_payload);
   // fill in header
   outbound_packet.header.seq = packet_header_seq;
   outbound_packet.header.type = (uint8_t) LOG;
   // fill in payload
-  outbound_log_payload.level = uint8_t(level);
-  outbound_log_payload.message_size = uint8_t( min(strlen(message)+1, 255-payload_metadata_size) );
-//  outbound_log_payload.message_size = uint8_t( min(message_len+1, 255-payload_metadata_size) );
+  outbound_log_payload.level = (uint8_t) level;
+  outbound_log_payload.message_size = uint8_t( min(strlen(message), 255-payload_metadata_size) );
   // complete header
   outbound_packet.header.payload_size = payload_metadata_size + outbound_log_payload.message_size;
   // copy message into the payload object
