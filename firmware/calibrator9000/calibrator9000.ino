@@ -256,7 +256,7 @@ data_payload_data_t outbound_data_payload;
 calibration_data_t device_calib;
 
 // device STATUS to string
-const char* get_device_status_name(int16_t device_status){
+const String get_device_status_name(int16_t device_status){
    switch( device_status ){
       case FAILURE: return "FAILURE";
       case UNCONFIGURED: return "UNCONFIGURED";
@@ -408,10 +408,9 @@ void setup() {
       status = CALIBRATED;
     }
   }
-  
-
-  
-  
+  if( status == CALIBRATING ){
+    log_to_serial( INFO, "Device uncalibrated! Waiting for the knobs to be calibrated" );  
+  }
 }//setup
 
 // this function stops the firmware and halts the device
@@ -689,27 +688,64 @@ void request_initialize( request_payload_initialize_t* request ){
   //TODO 
   if( _DEBUG )
     log_to_serial( WARN, "Received a INITIALIZE request" );
-  // initialize device
-  int j = 0;
-  uint8_t* enable_req = (uint8_t*)request;
-  for( int i = 0; i < num_knobs; i++ ){
-    if( enable_req[i] == 1 ){
-      active_knobs[j] = i;
-      knob_status[i] = (status == CALIBRATED)? UNITIALIZED : UNCALIBRATED;
-      j += 1;
-    }
-  }
-  num_active_knobs = j;
+  
+
+  
   // set next state
-  if( status == CALIBRATED ){
-    log_to_serial(WARN, "Status change: -> INITIALIZING");
-    status = INITIALIZING;
-    log_to_serial( INFO, "Device initialized! Waiting for the knobs to be reset" );
-  }else{
-    log_to_serial(WARN, "Status change: -> CALIBRATING");
-    status = CALIBRATING;
-    log_to_serial( INFO, "Device uncalibrated! Waiting for the knobs to be calibrated" );
+  bool update_active_knobs = false;
+  bool update_status = false;
+  enum STATUS next_status = status;
+  switch( status ){
+    case FAILURE:       // device in failure mode, it is not possible to initialize it
+    case UNCONFIGURED:  // this should never happen, the device should have been configured in setup()
+    case CALIBRATING:   // the device is still calibrating, it is not possible to initialize it
+      // nothing to do
+      break;
+    case CALIBRATED:
+      // the device is fully calibrated, it is possible to activate other knobs
+      update_active_knobs = true;
+      update_status = true;
+      next_status = INITIALIZING;
+      break;
+    case INITIALIZING:
+      // device already initialized but the initialization procedure is incomplete, it is possible to activate other knobs
+      update_active_knobs = true;
+      break;
+    case WORKING:
+      // device already initialized and working, it is not possible to activate other knobs; nothing to do
+      break;
   }
+  if( update_active_knobs ){
+    // initialize knobs
+    int j = 0;
+    uint8_t* enable_req = (uint8_t*)request;
+    for( int i = 0; i < num_knobs; i++ ){
+      if( enable_req[i] == 1 ){
+        active_knobs[j] = i;
+        knob_status[i] = UNITIALIZED;
+        j += 1;
+      }else{
+        knob_status[i] = UNUSED;  
+      }
+    }
+    num_active_knobs = j;
+  }
+
+  if( update_status ){
+    log_to_serial(WARN, String("Status change: -> " + get_device_status_name(next_status)).c_str() );
+    status = next_status;
+  }
+
+  
+//  if( status == CALIBRATED ){
+//    log_to_serial(WARN, "Status change: -> INITIALIZING");
+//    status = INITIALIZING;
+//    log_to_serial( INFO, "Device initialized! Waiting for the knobs to be reset" );
+//  }else if( status == UNCALIBRATED ){
+//    log_to_serial(WARN, "Status change: -> CALIBRATING");
+//    status = CALIBRATING;
+//    log_to_serial( INFO, "Device uncalibrated! Waiting for the knobs to be calibrated" );
+//  }
 }
 
 void request_recalibrate( request_payload_recalibrate_t* request ){
@@ -737,7 +773,7 @@ void debug_fcn(){
     return; // it is not time to publish debug info
   }
   // 1. send a packet with the status of the device and the status of each axis
-  snprintf( strbuf, sizeof strbuf, "STATUS: Device(%s); Axes: ", get_device_status_name(status) );
+  snprintf( strbuf, sizeof strbuf, "STATUS: Device(%s); Axes: ", get_device_status_name(status).c_str() );
   for( int knob_id = 0; knob_id < num_knobs; knob_id++ ){
     if( knob_id > 0 ){
       snprintf( strbuf, sizeof strbuf, "%s%s", strbuf, " | " );
@@ -803,7 +839,7 @@ void animate_led( int led_id, enum LED_STATUS led_status ){
   if( led_status == FIX ){
     pwm_value = led_pwm_high;
   }
-  // blink LED   
+  // blink LED
   if( led_status == BLINK || led_status == BLINK_FAST ){
     int blink_range = (led_status == BLINK_FAST)? 50 : 200;
     int animation_step = spin_counter % blink_range;
