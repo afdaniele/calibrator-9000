@@ -159,7 +159,7 @@ class Calibrator9000:
 
     def _start(self):
         while not self._shutdown_requested:
-            if self._device.inWaiting() > 0:
+            while self._device.inWaiting() > 0:
                 str_in = self._device.readline()
                 # remove new line char
                 str_in_stripped = str_in.rstrip()
