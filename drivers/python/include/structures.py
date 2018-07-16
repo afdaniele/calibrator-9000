@@ -4,6 +4,7 @@ import struct
 
 
 class KnobStatus(IntEnum):
+    DISABLED = -2
     UNUSED = -1
     UNCALIBRATED = 0
     UNITIALIZED = 1
@@ -45,7 +46,8 @@ class LogLevel(IntEnum):
     INFO = 0
     WARN = 1
     ERROR = 2
-    DEBUG = 3 # this log level is not defined in the firmware
+    HW_DEBUG = 3 # this log level is defined in the firmware as DEBUGGER
+    SW_DEBUG = 4 # this log level is not defined in the firmware
 
 class Struct(object):
     _device_endianness = '<' # little-endian

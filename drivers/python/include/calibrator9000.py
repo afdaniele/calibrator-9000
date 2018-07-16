@@ -34,10 +34,10 @@ class Calibrator9000:
 
     _device = None
     _device_thread = None
-    _knob_status = [ KnobStatus.UNUSED ] * _NUM_KNOBS
+    _knob_status = [ KnobStatus.DISABLED ] * _NUM_KNOBS
     _device_status = DeviceStatus.UNCONFIGURED
     _shutdown_requested = False
-    _logging_level = LogLevel.DEBUG
+    _logging_level = LogLevel.ERROR
     _inbound_packet = data_packet_t()
     _outbound_packet = request_packet_t()
     _payload_to_handler_map = {}
@@ -130,7 +130,7 @@ class Calibrator9000:
         self._device_status = DeviceStatus( payload.device_status )
         s = [payload.status_x, payload.status_y, payload.status_z, payload.status_r, payload.status_p, payload.status_w]
         for i in range(len(self._knob_status)):
-            self._knob_status = KnobStatus( s[i] )
+            self._knob_status[i] = KnobStatus( s[i] )
         # generate event
         self._generate_event( DataFeed.STATUS, payload )
 
@@ -148,7 +148,7 @@ class Calibrator9000:
         self._log( LogLevel(payload.level), payload.message, origin='firmware' )
 
     def _generate_event(self, datafeed, data):
-        for fcn in self._listeners[datafeed]:
+        for _, fcn in self._listeners[datafeed].items():
             fcn( data )
 
     def _send_packet(self):
@@ -195,7 +195,7 @@ class Calibrator9000:
         return packet_str
 
     def _debug(self, message):
-        self._log( LogLevel.DEBUG, message )
+        self._log( LogLevel.SW_DEBUG, message )
 
     def _log(self, level, message, origin='drivers'):
         if level in LogLevel and level.value <= self._logging_level:
@@ -208,10 +208,11 @@ if __name__ == '__main__':
     c = Calibrator9000(
         port='/dev/cu.usbmodem1421',
         baudrate=9600,
-        log_level=LogLevel.DEBUG
+        log_level=LogLevel.ERROR
     )
 
     c.initialize( enable_x=True, enable_y=True )
+    # c.recalibrate( recalibrate_y=1 )
 
     def c_fcn(config):
         print 'Axis: [x:%r, y:%r, z:%r, r:%r, p:%r, w:%r]' % (
@@ -224,18 +225,17 @@ if __name__ == '__main__':
         )
     c.subscribe( c_fcn )
 
-
     def s_fcn(status):
-        print 'Status: [device:%r, x:%r, y:%r, z:%r, r:%r, p:%r, w:%r]' % (
-            DeviceStatus(status.device_status),
-            KnobStatus(status.status_x),
-            KnobStatus(status.status_y),
-            KnobStatus(status.status_z),
-            KnobStatus(status.status_r),
-            KnobStatus(status.status_p),
-            KnobStatus(status.status_w)
+        print 'Status: [device:%s, x:%s, y:%s, z:%s, r:%s, p:%s, w:%s]' % (
+            DeviceStatus(status.device_status).name,
+            KnobStatus(status.status_x).name,
+            KnobStatus(status.status_y).name,
+            KnobStatus(status.status_z).name,
+            KnobStatus(status.status_r).name,
+            KnobStatus(status.status_p).name,
+            KnobStatus(status.status_w).name
         )
-    c.subscribe( s_fcn, datafeed=DataFeed.STATUS )
+    # c.subscribe( s_fcn, datafeed=DataFeed.STATUS )
 
     # listen for Ctrl-C
     signal.signal( signal.SIGINT, lambda _a,_b: c.shutdown() )
