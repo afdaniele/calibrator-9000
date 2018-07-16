@@ -384,8 +384,8 @@ void loop() {
   // if somebody is talking to the firmware over USBSerial
   while( Serial.available() > 0 )
     process_incoming_byte( Serial.read() );
-
-  // publish status
+    
+  // STATUS packets
   if( spin_counter % status_publisher_spin_range == 0 ){
     // fill in header
     outbound_packet.header.seq = (uint32_t) packet_header_seq;
@@ -396,12 +396,6 @@ void loop() {
     for( int i=0; i < num_knobs; i++ ){
       ((int8_t*)&outbound_status_payload)[i+1] = (int8_t) knob_status[i];
     }
-//      outbound_data_payload.axis_x = knob_value[0];
-//      outbound_data_payload.axis_y = knob_value[1];
-//      outbound_data_payload.axis_z = knob_value[2];
-//      outbound_data_payload.axis_r = knob_value[3];
-//      outbound_data_payload.axis_p = knob_value[4];
-//      outbound_data_payload.axis_w = knob_value[5];
     // attach payload to packet
     memcpy( outbound_packet.payload, &outbound_status_payload, sizeof(outbound_status_payload) );
     // publish packet
@@ -497,7 +491,6 @@ void loop() {
         } 
       }
     }
-
     // save calibration to file
     int uncalibrated_knobs = 0;
     for( int knob_id = 0; knob_id < num_knobs; knob_id++ ){
@@ -573,12 +566,6 @@ void loop() {
       for( int i=0; i < num_knobs; i++ ){
         ((float*)&outbound_data_payload)[i] = knob_value[i];
       }
-//      outbound_data_payload.axis_x = knob_value[0];
-//      outbound_data_payload.axis_y = knob_value[1];
-//      outbound_data_payload.axis_z = knob_value[2];
-//      outbound_data_payload.axis_r = knob_value[3];
-//      outbound_data_payload.axis_p = knob_value[4];
-//      outbound_data_payload.axis_w = knob_value[5];
       // attach payload to packet
       memcpy( outbound_packet.payload, &outbound_data_payload, sizeof(outbound_data_payload) );
       // publish packet
