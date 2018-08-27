@@ -53,3 +53,6 @@ dkms.conf
 
 # Python files
 *.pyc
+
+# Mac OS files
+*.DS_Store
