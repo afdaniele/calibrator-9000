@@ -31,7 +31,7 @@ const unsigned int serial_input_max_num_bytes = 256;
 const int knob_init_time_secs = 2;
 const int knob_calib_time_secs = 2;
 const bool potentiometer_inverted = true;
-const int RST_port_id = 7;
+const int RST_port_id = 12;
 const int led_pwm_high = 255;
 const int num_knobs = 6;
 const int smooth_history_size = 10;
@@ -53,20 +53,20 @@ const float knob_init_dead_zone_extension = 0.1 * ((float)potentiometer_max_valu
 const float knob_calib_zone_extension = 0.2 * ((float)potentiometer_max_value);       // 20% of the range
 
 // ADC ports used to read the potentiometers
-//int knob_adc_port[] = {A0, A1, A2, A3, A4, A5};
-int knob_adc_port[] = {A3, A2, A1, A0, A4, A5}; //DEBUG only: TO BE REMOVED (breadboard only)
+int knob_adc_port[] = {A5, A4, A3, A2, A1, A0};
+//int knob_adc_port[] = {A3, A2, A1, A0, A4, A5}; //DEBUG only: TO BE REMOVED (breadboard only)
 
 // variable name associated to each knob
 char knob_var_name[] = {'x', 'y', 'z', 'r', 'p', 'w'};
 
 // PWM port for each RGB channel of each knob
 int knob_led_port[] = {
+  4,
   5,
-  10,
-  12,
-  11,
   9,
-  4
+  10,
+  11,
+  3
 };
 
 // knob status
@@ -297,18 +297,22 @@ void setup() {
   reset_calibration();
 
   //DEBUG only (the breadboard has only 4 knobs)
-  knob_status[4] = DISABLED;
-  knob_status[5] = DISABLED;
+//  knob_status[4] = DISABLED;
+//  knob_status[5] = DISABLED;
   //DEBUG only (the breadboard has only 4 knobs)
 
   // configure ADC
   analogReadResolution(adc_bits_resolution);
-  // configure RGB PWM ports
+  // configure PWM ports
   for( int i = 0; i < num_knobs; i++ ){
     int port_id = knob_led_port[i];
     // configure port
     pinMode(port_id, OUTPUT);
+    analogWrite(port_id, 0.0);
   }
+  // configure RST pin
+  pinMode(RST_port_id, OUTPUT);
+  digitalWrite(RST_port_id, LOW);
   // fill in constant data for outbound packet
   outbound_packet.header.BOS = (uint8_t) DATA_BOS;
   outbound_packet.header.EOS = (uint8_t) DATA_EOS;
@@ -539,7 +543,11 @@ void loop() {
           knob_status[knob_id] = READY;
           animate_led( knob_id, FIX );
         }else{
-          animate_led( knob_id, BLINK_FAST );
+          // stop blinking 2*smooth_history_size timesteps before saving the zero_value, this helps stabilize the voltages on the potentiometers with FIXED leds
+          if( knob_init_timer_counters[knob_id] < knob_init_time_steps-2*smooth_history_size )
+            animate_led( knob_id, BLINK_FAST );
+          else
+            animate_led( knob_id, FIX );
         }
       }
     }
@@ -684,6 +692,9 @@ void request_initialize( request_payload_initialize_t* request ){
       break;
     case WORKING:
       // device already initialized and working, it is not possible to activate other knobs; nothing to do
+      update_active_knobs = true;
+      update_status = true;
+      next_status = INITIALIZING;
       break;
   }
   // update list of active knobs
@@ -693,11 +704,13 @@ void request_initialize( request_payload_initialize_t* request ){
     uint8_t* enable_req = (uint8_t*)request;
     for( int i = 0; i < num_knobs; i++ ){
       if( enable_req[i] == 1 ){
+        if( knob_status[i] >= READY ) continue;
         active_knobs[j] = i;
         knob_status[i] = UNITIALIZED;
         j += 1;
       }else{
-        knob_status[i] = UNUSED;  
+        if( knob_status[i] <= UNCALIBRATED ) 
+          knob_status[i] = UNUSED;
       }
     }
     num_active_knobs = j;
