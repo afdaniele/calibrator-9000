@@ -62,8 +62,9 @@ class Struct(object):
     }
     _attributes = []
 
-    def __init__(self):
+    def __init__(self, logger=None):
         self._min_required_size = 0
+        self._logger = logger
         # iterate over the attributes and create placeholders
         for i in range(len(self._attributes)):
             attr_value = 0 # default value (safe value for attr_size, change with caution)
@@ -142,6 +143,7 @@ class Struct(object):
                     try:
                         self.__dict__[attr_name] = struct.unpack( attr_fmt, attr_data )[0]
                     except:
+
                         return (False, -1)
             # move cursor to next unused byte
             cursor_in = cursor_fin
@@ -278,8 +280,8 @@ class request_packet_t(Struct):
         RequestOperation.SHUTDOWN : request_payload_empty_t
     }
 
-    def __init__(self):
-        super(request_packet_t, self).__init__()
+    def __init__(self, logger=None):
+        super(request_packet_t, self).__init__(logger)
         self.header._prepare()
         self.__dict__['payload'] = request_payload_empty_t()
 
@@ -407,8 +409,8 @@ class data_packet_t(Struct):
         DataPacketType.LOG : data_payload_log_t
     }
 
-    def __init__(self):
-        super(data_packet_t, self).__init__()
+    def __init__(self, logger=None):
+        super(data_packet_t, self).__init__(logger)
         self.header._prepare()
         self.__dict__['payload'] = data_payload_empty_t()
 

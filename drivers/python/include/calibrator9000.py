@@ -32,12 +32,22 @@ class Calibrator9000:
         [0,   255, 255]
     ]
 
+    class Logger(object):
+        def log(self, level, message, origin='drivers'):
+            raise NotImplementedError( "The method is not implemented" )
+
+    class StdOutLogger(Logger):
+        def log(self, level, message, origin='drivers'):
+            if level in LogLevel or level in LogLevel._value2member_map_:
+                print 'Calibrator[%s:%s] :: %s' % ( origin, LogLevel(level).name, message )
+
     _device = None
     _device_thread = None
     _knob_status = [ KnobStatus.DISABLED ] * _NUM_KNOBS
     _device_status = DeviceStatus.UNCONFIGURED
     _shutdown_requested = False
     _logging_level = LogLevel.ERROR
+    _logger = StdOutLogger()
     _inbound_packet = data_packet_t()
     _outbound_packet = request_packet_t()
     _payload_to_handler_map = {}
@@ -138,6 +148,9 @@ class Calibrator9000:
         if not isinstance(payload, data_payload_data_t):
             self._log( LogLevel.WARN, "Received packet of type DATA but payload is of type '%s'" % type(payload) )
         if self._device_status == DeviceStatus.WORKING:
+            # this fixes the problem of empty payload (never found the problem)
+            if len([1 for k in data_payload_data_t._attributes if payload.__dict__[k[1]] == 0 ]) == len(data_payload_data_t._attributes):
+                return
             # generate event
             self._generate_event( DataFeed.DATA, payload )
 
@@ -168,7 +181,7 @@ class Calibrator9000:
                 if success: # packet is valid
                     # DEBUGGING
                     self._debug( "Packet received" )
-                    self._debug( self._packet_as_string(self._inbound_packet) )
+                    self._debug( "Raw data: %d byets %s" % (len(str_in), self._packet_as_string(self._inbound_packet)) )
                     # interpret packet
                     self._process_inbound_packet()
             # keep spinning
@@ -198,24 +211,46 @@ class Calibrator9000:
         self._log( LogLevel.SW_DEBUG, message )
 
     def _log(self, level, message, origin='drivers'):
-        if level in LogLevel and level.value <= self._logging_level:
-            print 'Calibrator[%s:%s] :: %s' % ( origin, LogLevel(level).name, message )
+        if level.value <= self._logging_level:
+            self._logger.log( origin, level, message )
+            # print 'Calibrator[%s:%s] :: %s' % ( origin, LogLevel(level).name, message )
 
 
 # test sample
 if __name__ == '__main__':
     # create device interface
     c = Calibrator9000(
-        port='/dev/cu.usbmodem1421',
+        port='/dev/cu.usbmodem123',
         baudrate=9600,
-        log_level=LogLevel.ERROR
+        log_level=LogLevel.SW_DEBUG
     )
 
-    c.initialize( enable_x=True, enable_y=True )
-    # c.recalibrate( recalibrate_y=1 )
+    time.sleep(2)
+
+    c.initialize(
+        enable_x=True,
+        enable_y=True,
+        enable_z=True,
+        enable_r=True,
+        enable_p=True,
+        enable_w=True
+    )
+
+    # c.recalibrate(
+    #     recalibrate_x=True,
+    #     recalibrate_y=True,
+    #     recalibrate_z=True,
+    #     recalibrate_r=True,
+    #     recalibrate_p=True,
+    #     recalibrate_w=True
+    # )
+
+
+    # c.initialize( enable_x=True )
+    # c.recalibrate( recalibrate_x=1 )
 
     def c_fcn(config):
-        print 'Axis: [x:%r, y:%r, z:%r, r:%r, p:%r, w:%r]' % (
+        print 'Axis: [x:%.3f, y:%.3f, z:%.3f, r:%.3f, p:%.3f, w:%.3f]' % (
             config.axis_x,
             config.axis_y,
             config.axis_z,
