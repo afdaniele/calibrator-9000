@@ -1,6 +1,6 @@
-from inspect import isclass
-from enum import IntEnum
 import struct
+from enum import IntEnum
+from inspect import isclass
 
 
 class KnobStatus(IntEnum):
@@ -10,6 +10,7 @@ class KnobStatus(IntEnum):
     UNITIALIZED = 1
     READY = 2
 
+
 class DeviceStatus(IntEnum):
     FAILURE = -3
     UNCONFIGURED = -2
@@ -18,15 +19,18 @@ class DeviceStatus(IntEnum):
     INITIALIZING = 1
     WORKING = 2
 
+
 class DataFeed(IntEnum):
     STATUS = 0
     DATA = 1
+
 
 class DataPacketType(IntEnum):
     EMPTY = 0
     STATUS = 1
     DATA = 2
     LOG = 3
+
 
 class RequestOperation(IntEnum):
     NOOP = 0
@@ -35,30 +39,33 @@ class RequestOperation(IntEnum):
     RECALIBRATE = 3
     SHUTDOWN = 4
 
+
 class PacketSignature(IntEnum):
-    REQUEST_BOS = 89    # uint8 01 01 10 01
-    REQUEST_EOS = 101   # uint8 01 10 01 01
-    DATA_BOS = 154      # uint8 10 01 10 10
-    DATA_EOS = 166      # uint8 10 10 01 10
+    REQUEST_BOS = 89  # uint8 01 01 10 01
+    REQUEST_EOS = 101  # uint8 01 10 01 01
+    DATA_BOS = 154  # uint8 10 01 10 10
+    DATA_EOS = 166  # uint8 10 10 01 10
+
 
 class LogLevel(IntEnum):
     OFF = -1  # this log level is not defined in the firmware
     INFO = 0
     WARN = 1
     ERROR = 2
-    HW_DEBUG = 3 # this log level is defined in the firmware as DEBUGGER
-    SW_DEBUG = 4 # this log level is not defined in the firmware
+    HW_DEBUG = 3  # this log level is defined in the firmware as DEBUGGER
+    SW_DEBUG = 4  # this log level is not defined in the firmware
+
 
 class Struct(object):
-    _device_endianness = '<' # little-endian
+    _device_endianness = '<'  # little-endian
     _type_to_format_map = {
-        'uint8_t' : lambda _ : 'B',
-        'uint16_t' : lambda _ : 'H',
-        'uint32_t' : lambda _ : 'I',
-        'int8_t' : lambda _ : 'b',
-        'float' : lambda _ : 'f',
-        'char[]' : lambda n : '%ds' % n,
-        'byte*' : lambda n : '%ds' % n
+        'uint8_t': lambda _: 'B',
+        'uint16_t': lambda _: 'H',
+        'uint32_t': lambda _: 'I',
+        'int8_t': lambda _: 'b',
+        'float': lambda _: 'f',
+        'char[]': lambda n: '%ds' % n,
+        'byte*': lambda n: '%ds' % n
     }
     _attributes = []
 
@@ -67,14 +74,14 @@ class Struct(object):
         self._logger = logger
         # iterate over the attributes and create placeholders
         for i in range(len(self._attributes)):
-            attr_value = 0 # default value (safe value for attr_size, change with caution)
+            attr_value = 0  # default value (safe value for attr_size, change with caution)
             attr_type, attr_name, attr_size = self._attributes[i]
             # composite attribute (e.g., header)
-            if isclass(attr_type) and issubclass(attr_type,Struct):
+            if isclass(attr_type) and issubclass(attr_type, Struct):
                 attr_value = attr_type()
             self.__dict__[attr_name] = attr_value
             # compute (minimal) required size
-            if( not isinstance(attr_size, basestring) ):
+            if (not isinstance(attr_size, str)):
                 self._min_required_size += attr_size
 
     @classmethod
@@ -82,26 +89,26 @@ class Struct(object):
         return '%s%s' % (
             Struct._device_endianness if not skip_endianness else '',
             ''.join([
-                t.get_template(skip_endianness=True) if isclass(t) and issubclass(t,Struct)
+                t.get_template(skip_endianness=True) if isclass(t) and issubclass(t, Struct)
                 else Struct._type_to_format_map[t](s)
-                for t,_,s in clss._attributes
+                for t, _, s in clss._attributes
             ])
         )
 
     @classmethod
     def get_template_size(clss):
-        return struct.calcsize( clss.get_template() )
+        return struct.calcsize(clss.get_template())
 
     def get_size(self):
         size = 0
         # iterate over the attributes
         for attr_type, attr_name, attr_size in self._attributes:
             attr_value = self.__dict__[attr_name]
-            if( isinstance(attr_value, Struct) ):
+            if (isinstance(attr_value, Struct)):
                 size += attr_value.get_size()
             else:
-                if isinstance(attr_size, basestring) and attr_type == 'char[]':
-                    size += len( str(attr_value) )
+                if isinstance(attr_size, str) and attr_type == 'char[]':
+                    size += len(str(attr_value))
                 else:
                     size += attr_size
         return size
@@ -109,12 +116,12 @@ class Struct(object):
     def decode(self, data):
         # check size requirements
         if len(data) < self._min_required_size:
-            return (False, -1)
+            return False, -1
         cursor_in = 0
         # iterate over the attributes
         for attr_type, attr_name, attr_size in self._attributes:
             # resolve attr_size based on other parts of the packet
-            if( isinstance(attr_size,basestring) ):
+            if isinstance(attr_size, str):
                 attr_size_tup = attr_size.split('.')
                 cur_el = self
                 for el in attr_size_tup:
@@ -124,7 +131,7 @@ class Struct(object):
             if isclass(attr_type) and issubclass(attr_type, Struct):
                 # composite attribute (e.g., header)
                 attr_data = data[cursor_in:]
-                success, size = self.__dict__[attr_name].decode( attr_data )
+                success, size = self.__dict__[attr_name].decode(attr_data)
                 if not success: return (False, -1)
                 cursor_fin = cursor_in + size
             else:
@@ -133,35 +140,36 @@ class Struct(object):
                 attr_data = data[cursor_in:cursor_fin]
                 if attr_type == 'byte*':
                     # byte array
-                    attr_class = self._bytearr_to_class( attr_name )
+                    attr_class = self._bytearr_to_class(attr_name)
                     if attr_class is None: return (False, -1)
                     self.__dict__[attr_name] = attr_class()
-                    self.__dict__[attr_name].decode( attr_data )
+                    self.__dict__[attr_name].decode(attr_data)
                 else:
                     # primitive data type (byte array excluded)
                     attr_fmt = '%s%s' % (Struct._device_endianness, Struct._type_to_format_map[attr_type](attr_size))
                     try:
-                        self.__dict__[attr_name] = struct.unpack( attr_fmt, attr_data )[0]
+                        self.__dict__[attr_name] = struct.unpack(attr_fmt, attr_data)[0]
                     except:
 
                         return (False, -1)
             # move cursor to next unused byte
             cursor_in = cursor_fin
         success = self._is_valid()
-        return ( success, cursor_in )
+        return (success, cursor_in)
 
     def encode(self):
         self._prepare()
-        bytestr = ''
+        bytestr = b''
         # iterate over the attributes
         for attr_type, attr_name, attr_size in self._attributes:
             attr_value = self.__dict__[attr_name]
-            if( isinstance(attr_value, Struct) ):
+            if isinstance(attr_value, Struct):
                 bytestr += attr_value.encode()
             else:
-                if attr_type == 'byte*': continue
+                if attr_type == 'byte*':
+                    continue
                 length = 0
-                if isinstance(attr_size, basestring) and attr_type == 'char[]':
+                if isinstance(attr_size, str) and attr_type == 'char[]':
                     length = len(attr_value)
                 bytestr += struct.pack(
                     '%s%s' % (
@@ -173,13 +181,13 @@ class Struct(object):
         return bytestr
 
     def _is_valid(self):
-        raise NotImplementedError( "The method is not implemented" )
+        raise NotImplementedError("The method is not implemented")
 
     def _prepare(self):
-        raise NotImplementedError( "The method is not implemented" )
+        raise NotImplementedError("The method is not implemented")
 
     def _bytearr_to_class(self, attr_name, attr_data):
-        raise NotImplementedError( "The method is not implemented" )
+        raise NotImplementedError("The method is not implemented")
 
 
 # static payload structure, the payload is valid by default, nothing to prepare
@@ -209,8 +217,8 @@ class request_packet_header_t(Struct):
 
     def _is_valid(self):
         return (self.BOS == PacketSignature.REQUEST_BOS
-        and self.EOS == PacketSignature.REQUEST_EOS
-        and self.operation in RequestOperation._value2member_map_)
+                and self.EOS == PacketSignature.REQUEST_EOS
+                and self.operation in RequestOperation._value2member_map_)
 
     def _prepare(self):
         self.BOS = PacketSignature.REQUEST_BOS.value
@@ -273,11 +281,11 @@ class request_packet_t(Struct):
     ]
 
     _payload_bytearr_to_class_map = {
-        RequestOperation.NOOP : request_payload_empty_t,
-        RequestOperation.RESET : request_payload_empty_t,
-        RequestOperation.INITIALIZE : request_payload_initialize_t,
-        RequestOperation.RECALIBRATE : request_payload_recalibrate_t,
-        RequestOperation.SHUTDOWN : request_payload_empty_t
+        RequestOperation.NOOP: request_payload_empty_t,
+        RequestOperation.RESET: request_payload_empty_t,
+        RequestOperation.INITIALIZE: request_payload_initialize_t,
+        RequestOperation.RECALIBRATE: request_payload_recalibrate_t,
+        RequestOperation.SHUTDOWN: request_payload_empty_t
     }
 
     def __init__(self, logger=None):
@@ -319,8 +327,8 @@ class data_packet_header_t(Struct):
 
     def _is_valid(self):
         return (self.BOS == PacketSignature.DATA_BOS
-        and self.EOS == PacketSignature.DATA_EOS
-        and self.type in DataPacketType._value2member_map_)
+                and self.EOS == PacketSignature.DATA_EOS
+                and self.type in DataPacketType._value2member_map_)
 
     def _prepare(self):
         self.BOS = PacketSignature.DATA_BOS.value
@@ -353,6 +361,7 @@ class data_payload_status_t(StaticPayloadStruct):
         ('int8_t', 'status_p', 1),
         ('int8_t', 'status_w', 1)
     ]
+
 
 # struct {
 #   float axis_x;
@@ -403,10 +412,10 @@ class data_packet_t(Struct):
     ]
 
     _payload_bytearr_to_class_map = {
-        DataPacketType.EMPTY : data_payload_empty_t,
-        DataPacketType.STATUS : data_payload_status_t,
-        DataPacketType.DATA : data_payload_data_t,
-        DataPacketType.LOG : data_payload_log_t
+        DataPacketType.EMPTY: data_payload_empty_t,
+        DataPacketType.STATUS: data_payload_status_t,
+        DataPacketType.DATA: data_payload_data_t,
+        DataPacketType.LOG: data_payload_log_t
     }
 
     def __init__(self, logger=None):
